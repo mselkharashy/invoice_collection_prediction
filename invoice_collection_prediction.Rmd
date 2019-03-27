@@ -1,0 +1,326 @@
+---
+title: "Invoice Collection Prediction"
+output: html_notebook
+---
+# Libraries 
+```{r results='hide'}
+library(readr)
+library(tidyverse)
+library(forcats)
+library(miscset)
+library(lubridate)
+library(caret)
+library(ranger)
+
+```
+
+# Load Data
+
+```{r results='hide'}
+data <- read_csv("~/Documents/workspace/invoice_to_collection_prediction/data/Keysight/sorted_data.csv")
+
+```
+
+# Data Processing & Exploration
+```{r}
+glimpse(data)
+```
+
+
+```{r}
+
+data %>%
+  select_if(is.numeric) %>%
+  map_dfr(n_distinct) %>%
+  gather() %>%
+  ggplot(aes(reorder(key, -value), value)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  #scale_y_log10(breaks = c(5, 50, 250, 500, 1000, 10000, 50000)) +
+  #geom_text(aes(label = value), vjust = 1.6, color = "white", size=3.5) +
+  theme_minimal() +
+  labs(x = "features", y = "Number of unique values") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+* We can drop sequential index that has the same unique values **X1**, **index**
+* Converting categorical features **BILL_TO_COUNTRY**, **Org_Id**, **CUST_ACCOUNT_NUMBER**, **PAYMENT_CLASS**, **PAYMENT_STATUS**, **PAYMENT_TERM**, **TRANSACTION_SUB_TYPE**, and **TRANSACTION_TYPE**
+
+
+```{r}
+data %>%
+  select(-X1, -index, -overDueDays) %>%
+  mutate(BILL_TO__COUNTRY = as.factor(BILL_TO__COUNTRY),
+         Org_Id = as.factor(Org_Id),
+         CUST_ACCOUNT_NUMBER = as.factor(CUST_ACCOUNT_NUMBER),
+         # replace the missing values (NAs) with "missing"
+         CUST_ACCOUNT_NUMBER = fct_explicit_na(CUST_ACCOUNT_NUMBER, "missing"),
+         PAYMENT_CLASS = as.factor(PAYMENT_CLASS), 
+         PAYMENT_STATUS = as.factor(PAYMENT_STATUS),
+         PAYMENT_TERM = as.factor(PAYMENT_TERM),
+         TRANSACTION_SUB_TYPE = as.factor(TRANSACTION_SUB_TYPE),
+         TRANSACTION_TYPE = as.factor(TRANSACTION_TYPE)
+         ) -> data
+
+```
+
+```{r}
+data %>%
+  select_if(is.factor) %>%
+  summary()
+
+data %>%
+  select_if(is.numeric) %>%
+  summary()
+
+
+data %>%
+  glimpse()
+```
+
+There are some invoices with negative values. Is that normal? 
+
+```{r}
+data %>% 
+  select(AMOUNT_DUE_ORIGINAL, AMOUNT_DUE_REMAINING) %>% 
+  mutate(pos_due_original = ifelse(AMOUNT_DUE_ORIGINAL >= 0, 1, 0),
+         pos_due_remaining = ifelse(AMOUNT_DUE_REMAINING >= 0, 1, 0)) %>%
+  summarise(pos_due_original = mean(pos_due_original), pos_due_remaining = mean(pos_due_remaining))
+
+```
+Most propably the negative invoices are cancelled ones. 
+
+```{r}
+
+p1 <- data %>% 
+  ggplot(aes(x=log(AMOUNT_DUE_ORIGINAL), y=..density..)) + 
+  geom_histogram(fill='steelblue', na.rm=TRUE, bins=40) + 
+  geom_density(aes(x=log(AMOUNT_DUE_ORIGINAL)), fill='orange', color='orange', alpha=0.3, na.rm=TRUE) + 
+  labs(
+    title = 'Distribution of  AMOUNT_DUE_ORIGINAL',
+    x = 'Natural log of AMOUNT_DUE_ORIGINAL'
+  )
+
+p2 <- data %>% 
+  ggplot(aes(x=log(AMOUNT_DUE_REMAINING), y=..density..)) + 
+  geom_histogram(fill='steelblue', na.rm=TRUE, bins=40) + 
+  geom_density(aes(x=log(AMOUNT_DUE_REMAINING)), fill='orange', color='orange', alpha=0.3, na.rm=TRUE) + 
+  labs(
+    title = 'Distribution of  AMOUNT_DUE_REMAINING',
+    x = 'Natural log of AMOUNT_DUE_REMAINING'
+  )
+ggplotGrid(list(p1, p2), ncol = 2)
+
+rm(p1)
+rm(p2)
+
+```
+
+We will create a new coulmn to determine number of delayes of closed invoices.
+
+```{r}
+
+data <- data %>%
+  mutate(delinquent_days = difftime(Actual_Date_Closed, Due_Date, units = "days"))
+
+```
+
+Adding a new feature **ageing** to calssify the delinguent invoices.
+
+```{r}
+# Geting the max delay of closed invoices.
+data %>% 
+  select(PAYMENT_STATUS, delinquent_days) %>% 
+  filter(PAYMENT_STATUS == "CL") %>%
+  summarise(max_delay = min(delinquent_days))
+
+# Divid the delays to bukets 
+data %>%
+  mutate(aging = cut(as.numeric(data$delinquent_days), br = c(-Inf, -500, 0, 30, 60, 90, Inf), labels = c('overdue', 'on_time', 'i1_30', 'i31_60', 'i61_90', 'i90_plus'))) -> data
+
+```
+
+# Exploring Categorical Variables 
+```{r}
+
+data %>%
+  mutate(BILL_TO__COUNTRY = fct_lump(BILL_TO__COUNTRY, prop = 0.03)) %>%
+  mutate(CUST_ACCOUNT_NUMBER = fct_lump(CUST_ACCOUNT_NUMBER, prop = 0.03)) %>%
+  mutate(Org_Id = fct_lump(Org_Id, prop = 0.03)) %>%
+  mutate(PAYMENT_TERM = fct_lump(PAYMENT_TERM, prop = 0.03)) %>%
+  mutate(TRANSACTION_SUB_TYPE = fct_lump(TRANSACTION_SUB_TYPE, prop = 0.03)) -> data 
+
+ggplotGrid(ncol = 2, hight = 100,
+lapply(c("BILL_TO__COUNTRY","CUST_ACCOUNT_NUMBER","Org_Id","PAYMENT_CLASS","PAYMENT_STATUS", "PAYMENT_TERM", "TRANSACTION_SUB_TYPE", 
+         "aging"),
+       function(col){
+         ggplot(data, aes_string(col, fill = "aging")) + geom_bar() + 
+           #scale_y_log10() + 
+           theme(axis.text.x = element_text(angle = 15, hjust = 1))
+       }))
+```
+```{r}
+data %>%
+  select(BILL_TO__COUNTRY, CUST_ACCOUNT_NUMBER, Org_Id, PAYMENT_CLASS, PAYMENT_TERM, PAYMENT_STATUS,
+         TRANSACTION_TYPE, TRANSACTION_SUB_TYPE, aging) %>%
+  group_by(aging) %>%
+  count()
+```
+
+# Feature Engineering 
+
+* Adding day, month of invoice creating, due, and closing date
+
+```{r}
+# data %>%
+#   select(CUST_ACCOUNT_NUMBER, INVOICE_CREATED_DATE, Due_Date, Actual_Date_Closed, aging) %>%
+#   filter(aging != 'overdue') %>%
+#   mutate(closed_month_day = day(Actual_Date_Closed)) %>%
+#   group_by(closed_month_day, CUST_ACCOUNT_NUMBER) %>%
+#   tally() %>%
+#   arrange(closed_month_day) %>%
+#   ggplot(aes(closed_month_day, n), col = CUST_ACCOUNT_NUMBER) + geom_col()
+#   
+
+data <- data %>%
+  mutate(closed_month = as.factor(month(Actual_Date_Closed)),
+         closed_day = as.factor(day(Actual_Date_Closed)), 
+         due_month = as.factor(month(Due_Date)), 
+         due_day = as.factor(day(Due_Date)), 
+         creating_month = as.factor(month(INVOICE_CREATED_DATE)),
+         creating_day = as.factor(day(INVOICE_CREATED_DATE)))
+
+```
+
+
+# Prediction Models
+
+## Prepare Training / Testing data
+```{r}
+data %>% 
+  select(-INVOICE_NUMBER, -BILLING_PERIOD) %>%
+  arrange(INVOICE_CREATED_DATE) -> data
+
+len = nrow(data)
+tr_length = as.integer(len * 0.7)
+tr_data = data[1:tr_length, ]
+tst_data = data[-(1:tr_length), ]
+
+rm(len) 
+rm(tr_length)
+
+```
+
+```{r}
+set.seed(42)
+myFolds <- createFolds(tr_data$aging, k = 5)
+# Create reusable trainControl object: myControl
+myControl <- trainControl(
+  summaryFunction = multiClassSummary,
+  classProbs = TRUE, # IMPORTANT!
+  verboseIter = TRUE, #don't print the progress
+  savePredictions = TRUE,
+  index = myFolds
+)
+
+```
+
+### Glment Model
+```{r results="hide"}
+#Glmnet Model
+set.seed(42)
+model_glmnet <- train(
+ aging ~ ., tr_data,
+ method = "glmnet",
+ #preProcess = c("center", "scale", "pca"),
+ tuneGrid = expand.grid(
+ alpha = 0:1,
+ lambda = 0:10/10
+ ),
+ trControl = myControl
+)
+
+```
+```{r}
+plot(model_glmnet)
+```
+
+```{r results='hide'}
+# Random Forest
+set.seed(42)
+model_rf <- train(
+ aging ~ ., tr_data,
+ method = "ranger",
+ importance = 'impurity',
+ #preProcess = c("center", "scale", "pca"),
+ trControl = myControl
+)
+```
+
+```{r}
+plot(model_rf)
+```
+
+```{r results='hdie'}
+# GBM
+set.seed(42)
+model_gbm <- train(
+ aging ~ ., tr_data,
+ method = "gbm",
+ #preProcess = c("center", "scale", "pca"),
+ trControl = myControl
+)
+```
+
+```{r}
+plot(model_gbm)
+```
+
+```{r results='hide'}
+#SVM
+set.seed(42)
+model_svm <- train(
+ aging ~ ., tr_data,
+ method = "svmRadial",
+ #preProcess = c("center", "scale", "pca"),
+ trControl = myControl
+)
+```
+
+```{r}
+plot(model_svm)
+```
+
+
+# Compering different models
+
+```{r}
+# Make a list
+model_list <- list(
+ glmnet = model_glmnet,
+ rf = model_rf,
+ gbm = model_gbm,
+ svm = model_svm
+ )
+# Collect resamples from the CV folds
+resamps <- resamples(model_list)
+resamps 
+```
+
+```{r}
+# Summarize the results
+summary(resamps)
+```
+
+
+```{r}
+dotplot(resamps, metric = "prAUC")
+```
+
+```{r}
+dotplot(resamps, metric = "logLoss")
+```
+
+```{r}
+varImp(model_glmnet)
+```
