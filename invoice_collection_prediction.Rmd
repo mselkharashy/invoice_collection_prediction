@@ -198,7 +198,7 @@ data <- data %>%
 ## Prepare Training / Testing data
 ```{r}
 data %>% 
-  select(-INVOICE_NUMBER, -BILLING_PERIOD) %>%
+  select(-INVOICE_NUMBER, -BILLING_PERIOD, -PAYMENT_STATUS) %>%
   arrange(INVOICE_CREATED_DATE) -> data
 
 len = nrow(data)
@@ -324,3 +324,25 @@ dotplot(resamps, metric = "logLoss")
 ```{r}
 varImp(model_glmnet)
 ```
+
+# Prediction Result
+
+```{r}
+p_svm <- predict(model_svm, tst_data)
+p_glmnet <- predict(model_glmnet, tst_data)
+p_rf <- predict(model_glmnet, tst_data)
+p_gbm <- predict(model_gbm, tst_data)
+
+(result <- data.frame(model = c("SVM", "Glmnet", "Random Forest", "GBM"), 
+           accuracy = c(mean(p_svm == tst_data$aging), 
+                        mean(p_glmnet == tst_data$aging), 
+                        mean(p_rf == tst_data$aging), 
+                        mean(p_gbm == tst_data$aging))))
+
+```
+
+```{r}
+result %>%
+  ggplot(aes(model, accuracy)) + geom_col()
+```
+
