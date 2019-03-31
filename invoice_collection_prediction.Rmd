@@ -183,9 +183,7 @@ data %>%
 #   
 
 data <- data %>%
-  mutate(closed_month = as.factor(month(Actual_Date_Closed)),
-         closed_day = as.factor(day(Actual_Date_Closed)), 
-         due_month = as.factor(month(Due_Date)), 
+  mutate(due_month = as.factor(month(Due_Date)), 
          due_day = as.factor(day(Due_Date)), 
          creating_month = as.factor(month(INVOICE_CREATED_DATE)),
          creating_day = as.factor(day(INVOICE_CREATED_DATE)))
@@ -198,7 +196,7 @@ data <- data %>%
 ## Prepare Training / Testing data
 ```{r}
 data %>% 
-  select(-INVOICE_NUMBER, -BILLING_PERIOD, -PAYMENT_STATUS) %>%
+  select(-INVOICE_NUMBER, -BILLING_PERIOD, -PAYMENT_STATUS, -Actual_Date_Closed, -delinquent_days) %>%
   arrange(INVOICE_CREATED_DATE) -> data
 
 len = nrow(data)
@@ -243,6 +241,9 @@ model_glmnet <- train(
 ```
 ```{r}
 plot(model_glmnet)
+
+save(model_glmnet, file = 'model_glmnet.rda')
+rm(model_glmnet)
 ```
 
 ```{r results='hide'}
@@ -259,6 +260,9 @@ model_rf <- train(
 
 ```{r}
 plot(model_rf)
+
+save(model_rf, file = 'model_rf.rda')
+rm(model_rf)
 ```
 
 ```{r results='hdie'}
@@ -267,13 +271,16 @@ set.seed(42)
 model_gbm <- train(
  aging ~ ., tr_data,
  method = "gbm",
- #preProcess = c("center", "scale", "pca"),
+ preProcess = c("nzv","center", "scale", "pca"),
  trControl = myControl
 )
 ```
 
 ```{r}
 plot(model_gbm)
+
+save(model_gbm, file = 'model_gbm.rda')
+rm(model_gbm)
 ```
 
 ```{r results='hide'}
@@ -282,13 +289,16 @@ set.seed(42)
 model_svm <- train(
  aging ~ ., tr_data,
  method = "svmRadial",
- #preProcess = c("center", "scale", "pca"),
+ preProcess = c("nzv", "center", "scale", "pca"),
  trControl = myControl
 )
 ```
 
 ```{r}
 plot(model_svm)
+
+save(model_svm, file = 'model_svm.rda')
+rm(model_svm)
 ```
 
 
@@ -297,13 +307,14 @@ plot(model_svm)
 ```{r}
 # Make a list
 model_list <- list(
- glmnet = model_glmnet,
- rf = model_rf,
- gbm = model_gbm,
- svm = model_svm
+ glmnet = load('model_glmnet.rda'),
+ rf = load('model_rf.rda'),
+ gbm = load('model_gbm.rda'),
+ svm = load('model_svm.rda')
  )
 # Collect resamples from the CV folds
 resamps <- resamples(model_list)
+rm(model_list)
 resamps 
 ```
 
@@ -322,16 +333,16 @@ dotplot(resamps, metric = "logLoss")
 ```
 
 ```{r}
-varImp(model_glmnet)
+varImp(model_list[['model_glmnet']])
 ```
 
 # Prediction Result
 
 ```{r}
-p_svm <- predict(model_svm, tst_data)
-p_glmnet <- predict(model_glmnet, tst_data)
-p_rf <- predict(model_glmnet, tst_data)
-p_gbm <- predict(model_gbm, tst_data)
+p_svm <- predict(model_list[['model_svm']], tst_data)
+p_glmnet <- predict(model_list[['model_glmnet']], tst_data)
+p_rf <- predict(model_list[['model_rf']], tst_data)
+p_gbm <- predict(model_list[['model_gbm']], tst_data)
 
 (result <- data.frame(model = c("SVM", "Glmnet", "Random Forest", "GBM"), 
            accuracy = c(mean(p_svm == tst_data$aging), 
