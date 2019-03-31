@@ -305,12 +305,17 @@ rm(model_svm)
 # Compering different models
 
 ```{r}
+load('model_glmnet.rda')
+load('model_rf.rda')
+load('model_gbm.rda')
+load('model_svm.rda')
+
 # Make a list
 model_list <- list(
- glmnet = load('model_glmnet.rda'),
- rf = load('model_rf.rda'),
- gbm = load('model_gbm.rda'),
- svm = load('model_svm.rda')
+ glmnet = model_glmnet,
+ rf = model_rf,
+ gbm = model_gbm,
+ svm = model_svm
  )
 # Collect resamples from the CV folds
 resamps <- resamples(model_list)
@@ -325,24 +330,21 @@ summary(resamps)
 
 
 ```{r}
-dotplot(resamps, metric = "prAUC")
+dotplot(resamps, metric = "AUC")
 ```
 
-```{r}
-dotplot(resamps, metric = "logLoss")
-```
 
 ```{r}
-varImp(model_list[['model_glmnet']])
+varImp(model_rf)
 ```
 
 # Prediction Result
 
 ```{r}
-p_svm <- predict(model_list[['model_svm']], tst_data)
-p_glmnet <- predict(model_list[['model_glmnet']], tst_data)
-p_rf <- predict(model_list[['model_rf']], tst_data)
-p_gbm <- predict(model_list[['model_gbm']], tst_data)
+p_svm <- predict(model_svm, tst_data)
+p_glmnet <- predict(model_glmnet, tst_data)
+p_rf <- predict(model_rf, tst_data)
+p_gbm <- predict(model_gbm, tst_data)
 
 (result <- data.frame(model = c("SVM", "Glmnet", "Random Forest", "GBM"), 
            accuracy = c(mean(p_svm == tst_data$aging), 
